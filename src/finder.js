@@ -30,6 +30,27 @@ const CACHE_DURATION = 604800000; // One week in milliseconds
 createUi();
 
 /**
+ * Check if a date is today
+ */
+function isToday(unixTimestamp) {
+  const today = new Date();
+  const todayYear = today.getFullYear();
+  const todayMonth = today.getMonth();
+  const todayDay = today.getDate();
+
+  const date = new Date(unixTimestamp * 1000);
+  const givenYear = date.getFullYear();
+  const givenMonth = date.getMonth();
+  const givenDay = date.getDate();
+
+  return (
+    todayYear === givenYear &&
+    todayMonth === givenMonth &&
+    todayDay === givenDay
+  );
+}
+
+/**
  * Create ui for user interaction.
  *
  */
@@ -54,6 +75,7 @@ function createUi() {
   ui.style.border = "2px solid black";
   ui.style.boxShadow = "7px 7px #444";
   ui.style.zIndex = "1000";
+  ui.style.color = "black";
 
   const title = document.createElement("h2");
   title.innerText = "BGA Duel Finder";
@@ -131,6 +153,49 @@ function createUi() {
   document.body.appendChild(ui);
   let duelsDiv;
 
+  textArea.addEventListener("paste", (event) => {
+    // Just check if pasted text was in the form of:
+    //
+    //   player1
+    //   vs
+    //   player2
+    //   player3
+    //   vs
+    //   player4
+    //   ...
+    //
+    // and fixed the text.
+    const pastedData = (event.clipboardData || window.clipboardData).getData('text');
+    const lines = pastedData.split("\n");
+    const selectedElements = lines.filter((_, index) => (index - 1) % 3 === 0);
+    const vsElements = selectedElements.filter(element => element.trim() === "vs");
+
+    if (selectedElements.length === 0 || selectedElements.length !== vsElements.length) {
+      return;
+    }
+    event.preventDefault();
+
+    const pairs = [];
+    for (let i = 0; i < lines.length; i += 3) {
+      const player1 = lines[i];
+      const player2 = lines[i + 2];
+      if (player1.trim() && player2.trim()) {
+        pairs.push(`${player1.trim()} vs ${player2.trim()}`);
+      }
+    }
+    const transformedText = pairs.join('\n');
+
+    // Get the current cursor position or selection
+    const start = textArea.selectionStart;
+    const end = textArea.selectionEnd;
+
+    // Insert the transformed text at the cursor position
+    textArea.value = textArea.value.slice(0, start) + transformedText + textArea.value.slice(end);
+
+    // Move the cursor to the end of the inserted text
+    textArea.selectionStart = textArea.selectionEnd = start + transformedText.length;
+  });
+
   button.onclick = async function () {
     const game_id = parseInt(gamePicker.value);
     const date = new Date(datePicker.value);
@@ -204,7 +269,7 @@ function getPlayerId(name) {
  * Return games for two players in a given day
  *
  */
-function getGames(player1, player2, day, game_id) {
+async function getGames(player1, player2, day, game_id) {
   const tables = [];
   try {
     const player1_id = getPlayerId(player1);
@@ -256,13 +321,52 @@ function getGames(player1, player2, day, game_id) {
     if (day) {
       players_url += `&start_date=${day}&end_date=${day + 86400}`;
     }
+
+    if (!day || isToday(day)) {
+      const table = await getGameInProgress(player1_id, player2_id);
+      if (table) {
+        tables.push({
+          id: table.id,
+          url: `https://boardgamearena.com/table?table=${table.id}`,
+          scores: `${table.progression}%`,
+          timestamp: table.gamestart,
+          date: (new Date(table.gamestart * 1000)).toISOString().substr(0, 16).replace("T", " "),
+          flags: " 🔥 "
+        });
+      }
+    }
     console.debug(`Got ${tables.length} tables`);
 
     return { player1_id, player2_id, players_url, tables };
   }
   catch (error) {
     console.error(`Couldnt get games for ${player1} - ${player2}: ${error}`);
+    return {
+      players_url: "#",
+      tables: []
+    };
   }
+}
+
+/**
+ * Return game in progress, if any, for the given players.
+ */
+async function getGameInProgress(player1_id, player2_id) {
+  const response = await dojo.xhrPost({
+    url: "https://boardgamearena.com/tablemanager/tablemanager/tableinfos.html",
+    postData: `playerfilter=${player1_id}&turninfo=false&matchmakingtables=false`,
+    handleAs: 'json',
+    headers: { 'X-Request-Token': bgaConfig.requestToken }
+  });
+  for (const table of Object.values(response.data.tables)) {
+    if (table.status === "play") {
+      const foundSecondPlayer = Object.keys(table.players).filter(id => id == player2_id);
+      if (foundSecondPlayer.length > 0) {
+        return table;
+      }
+    }
+  }
+  return undefined;
 }
 
 async function sleep(ms) {
@@ -296,7 +400,7 @@ async function getAllDuels(all_duels_txt, day, game_id) {
     players = [players[0].trim(), players[1].trim()];
 
     await sleep(REQUEST_INTERVAL);
-    const games_data = getGames(players[0], players[1], day, game_id);
+    const games_data = await getGames(players[0], players[1], day, game_id);
     const games = games_data.tables;
 
     // Add duel header info
